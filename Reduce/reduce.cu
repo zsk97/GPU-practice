@@ -188,6 +188,34 @@ __global__ void reduce6(T *input, T *output){
     if (tid == 0) output[blockIdx.x] = sum;
 }
 
+template <typename T>
+__global__ void reduce7(T* input, T* output, size_t n) {
+	T sum = 0;
+	size_t idx = threadIdx.x + blockIdx.x * blockDim.x * 4;
+	size_t tid = threadIdx.x;
+
+	sum += input[idx] + input[idx + blockDim.x] + input[idx + blockDim.x*2] + input[idx + blockDim.x*3];
+
+	__shared__ T warpLevelSums[WARP_SIZE];
+	const int laneId = threadIdx.x % WARP_SIZE;
+	const int warpId = threadIdx.x / WARP_SIZE;
+	
+	sum = warpReduceSum(sum);
+	if (laneId == 0) warpLevelSums[warpId] = sum;
+	__syncthreads();
+	
+	sum = (threadIdx.x < blockDim.x / WARP_SIZE) ? warpLevelSums[laneId] : 0;
+
+	// Final reduce using first warp
+    if (warpId == 0) {
+		sum += __shfl_down_sync(0xffffffff, sum, 4);// 0-4, 1-5, 2-6, etc.
+    	sum += __shfl_down_sync(0xffffffff, sum, 2);// 0-2, 1-3, 4-6, 5-7, etc.
+    	sum += __shfl_down_sync(0xffffffff, sum, 1);
+	}
+
+	if (tid == 0) output[blockIdx.x] = sum;		
+}
+
 int main() {
 	int n = 32 * 1024 * 1024;
 
@@ -208,13 +236,14 @@ int main() {
 	for (int i = 0; i < iter; i++) {
 		reduce0<<<num_block, THREAD_PER_BLOCK>>>(A_D, res_D);
 		reduce1<<<num_block, THREAD_PER_BLOCK>>>(A_D, res_D);
-		reduce2<<<num_block, THREAD_PER_BLOCK>>>(A_D, res_D);
+		reduce2<<<num_block * 2, THREAD_PER_BLOCK / 2>>>(A_D, res_D);
 	}
 
 	reduce3<<<num_block / 2, THREAD_PER_BLOCK>>>(A_D, res_D);
 	reduce4<<<num_block / 2, THREAD_PER_BLOCK>>>(A_D, res_D);	
 	reduce5<<<num_block / 2, THREAD_PER_BLOCK>>>(A_D, res_D);
 	reduce6<<<num_block / 2, THREAD_PER_BLOCK>>>(A_D, res_D);	
+	reduce7<<<num_block / 4, THREAD_PER_BLOCK>>>(A_D, res_D, n);
 
 	return 0;
 }
